@@ -1158,9 +1158,11 @@ Based on the package parameter, the Oracle package name is determined as follows
 
 #### 3.2 ProcessSingle Function Template
 
-**IMPORTANT: The following sections MUST be generated for ALL bill types (with or without goods fields):**
-- Lines 1169-1170: Variable declarations for v_BillInfo and v_Details
-- Lines 1210-1220: Core business logic (GenBill, configuration, state update, update GenNum, log success)
+**CRITICAL REQUIREMENTS: The following sections MUST be generated for ALL bill types (with or without goods fields):**
+- Variable declarations: `v_BillInfo PCU_{template}.BillInfo;` and `v_Details PCU_{template}.Details;`
+- Cursor declaration: `Cursor CDtl Is Select * From OpenApi2_{template}Dtl Where OwnerUuid = piUuid Order By Line Asc;`
+- Detail loop: Always generate the loop to populate v_Details from cursor CDtl
+- Core business logic (MANDATORY, never omit): Lines 1234-1244 below
 
 **Template**:
 
@@ -1179,6 +1181,7 @@ Based on the package parameter, the Oracle package name is determined as follows
     v_Num Typedef.TBillNum%Type;
     C_TABLENAME CONSTANT VARCHAR2(255) := 'OpenApi2_{template}';
     v_Sid OpenApi2_{template}.Sid%Type;
+    v_DefStat Int;
     Cursor CDtl Is Select * From OpenApi2_{template}Dtl Where OwnerUuid = piUuid Order By Line Asc;
   Begin
     v_Ret := 0;
@@ -1231,10 +1234,10 @@ Based on the package parameter, the Oracle package name is determined as follows
     --   End Loop;
     -- v_BillInfo.Details := v_Details;
 
-    -- 核心业务逻辑（固定生成部分，不可省略）
+    -- 核心业务逻辑（固定生成部分，所有单据类型必须生成，不可省略）
     v_Ret := PCU_{template}.GenBill(v_BillInfo, v_Oper, v_Num, poErr_Msg);
     If v_Ret <> 0 Then Return v_Ret; End If;
-    v_DefStat := To_Number(PPS_OpenApi2_Util.ReadConfig({cls}, v_Sid, 'defTargetStat', '100'));
+    v_DefStat := To_Number(PPS_OpenApi2_Util.ReadConfig('{cls}', v_Sid, 'defTargetStat', '100'));
     If v_DefStat <> 0 Then
       v_Ret := PPS_{template}.On_Modify(v_Num, v_Oper, v_DefStat, poErr_Msg);
       If v_Ret <> 0 Then Return v_Ret; End If;
@@ -1347,7 +1350,14 @@ For `genType=create, moduleId=vdrPay, package=bill.account, cls=交款单新增`
     v_Count Int;
   Begin
     v_Ret := 0;
-    -- TODO: 添加校验逻辑
+    Select Count(1) Into v_Count From OpenApi2_VdrPayDtl Where OwnerUuid = piUuid;
+    If v_Count = 0 Then
+      poErr_Msg := '待接收的单据没有明细记录，请检查数据';
+      Return (1);
+    End If;
+
+    -- TODO: 根据实际业务需求添加校验逻辑
+
     Return (v_Ret);
   End;
 
@@ -1358,24 +1368,54 @@ For `genType=create, moduleId=vdrPay, package=bill.account, cls=交款单新增`
   ) Return Number
     Is
     v_Ret Int;
+    v_Line Int;
     v_Oper Varchar2(30);
+    v_BillInfo PCU_VdrPay.BillInfo;
+    v_Details PCU_VdrPay.Details;
+    v_Num Typedef.TBillNum%Type;
     C_TABLENAME CONSTANT VARCHAR2(255) := 'OpenApi2_VdrPay';
     v_Sid OpenApi2_VdrPay.Sid%Type;
+    v_DefStat Int;
+    Cursor CDtl Is Select * From OpenApi2_VdrPayDtl Where OwnerUuid = piUuid Order By Line Asc;
   Begin
     v_Ret := 0;
     -- 数据校验
     v_Ret := CheckVdrPay(piUuid, poErr_Msg);
     If v_Ret <> 0 Then Return v_Ret; End If;
-    
+
     -- 状态锁检查
     v_Ret := PPS_OpenApi2.CheckStatLock(C_TABLENAME, piUuid);
     If v_Ret <> 0 Then Return(0); End If;
-    
+
     -- 读取单头数据
-    Select Sid, Filler Into v_Sid, v_Oper From OpenApi2_VdrPay o Where Uuid = piUuid;
-    
-    -- TODO: 添加业务逻辑
-    -- 记录成功日志
+    Select Sid, (Case When Is_Null(o.OperCode) = 1 And Is_Null(o.OperName) = 1 Then o.Filler Else o.OperName || '[' || o.OperCode || ']' End)
+      Into v_Sid, v_Oper
+      From OpenApi2_VdrPay o Where Uuid = piUuid;
+
+    -- TODO: 根据实际业务需求设置v_BillInfo和v_Details
+    -- VdrPayDetail does NOT have goods fields (extends no BaseBillDetail)
+    v_Line := 0;
+    v_Details := PCU_VdrPay.Details();
+    For RDtl In CDtl Loop
+      v_Line := v_Line + 1;
+      v_Details.Extend;
+      v_Details(v_Line).Line := v_Line;
+      v_Details(v_Line).ChgNum := RDtl.ChgNum;
+      v_Details(v_Line).PayTotal := RDtl.PayTotal;
+      -- Add other business fields from VdrPayDetail...
+      v_Details(v_Line).Note := RDtl.Note;
+    End Loop;
+    v_BillInfo.Details := v_Details;
+
+    -- 核心业务逻辑（固定生成部分，所有单据类型必须生成，不可省略）
+    v_Ret := PCU_VdrPay.GenBill(v_BillInfo, v_Oper, v_Num, poErr_Msg);
+    If v_Ret <> 0 Then Return v_Ret; End If;
+    v_DefStat := To_Number(PPS_OpenApi2_Util.ReadConfig('交款单新增', v_Sid, 'defTargetStat', '100'));
+    If v_DefStat <> 0 Then
+      v_Ret := PPS_VdrPay.On_Modify(v_Num, v_Oper, v_DefStat, poErr_Msg);
+      If v_Ret <> 0 Then Return v_Ret; End If;
+    End If;
+    Update OpenApi2_VdrPay Set GenNum = v_Num Where Uuid = piUuid;
     PPS_OpenApi2.RecordLog(C_TABLENAME, piUuid, C_PROCESSFLAG_SUCCESS, Null);
     Return v_Ret;
   End;
@@ -1404,6 +1444,13 @@ For `genType=create, moduleId=vdrPay, package=bill.account, cls=交款单新增`
 4. **Backup**: Always backup existing Oracle scripts before modification
 5. **Validation**: The Check function should contain appropriate validation logic based on business requirements
 6. **Business Logic**: The ProcessSingle function should implement the actual H6 bill generation logic
+7. **CRITICAL - Core Business Logic**: The ProcessSingle function MUST always include the following sections (lines 1234-1244 in template):
+   - `v_BillInfo` and `v_Details` variable declarations
+   - `v_DefStat` variable declaration (for default state)
+   - Cursor `CDtl` declaration to read details
+   - Detail loop to populate v_Details from cursor
+   - Core business logic: GenBill, ReadConfig, On_Modify, Update GenNum, RecordLog
+   - **These sections are mandatory for ALL bill types, regardless of whether details have goods fields**
 
 ### Oracle Script Generation Workflow Update
 
@@ -1414,7 +1461,7 @@ The main workflow should be updated to include these steps:
    - Determine oracle_package name based on package
    - Read existing PPS_OpenApi2_*_Pkg.oracle.sql file
    - Generate Check{template} function
-   - Generate ProcessSingle{template} function
+   - Generate ProcessSingle{template} function (CRITICAL: Must include core business logic sections)
    - Update PPS_OpenApi2_Pkg.oracle.sql (Process function)
    - Update PPS_OpenApi2_Pkg.oracle.sql (CheckBeforeUpload function)
    - Update PPS_OpenApi2_*_Hdr.oracle.sql (function declarations)
@@ -1426,6 +1473,7 @@ The main workflow should be updated to include these steps:
    - Ensure proper inheritance and annotations
    - Verify validation code is properly generated and formatted
    - Verify Oracle scripts are syntactically correct
+   - **CRITICAL: Verify ProcessSingle{template} includes core business logic sections**
 
 9. **Update DataProcessHandler**
    - Read DataProcessHandler.java file
